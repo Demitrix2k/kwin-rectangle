@@ -228,13 +228,16 @@ function manage(index, rs, cs, r, c) {
     client.setMaximize(false, false)
     client.frameGeometry = geometry
 
-    saveGeometry(client, geometry, prevGeometry, rectangleArgs)
-
-    // Free-form resizes leave the grid state stale, so Stretch Step and Move
-    // must not continue from an old cell.
+    // Grow, shrink and fill produce a free-form size, not a snap, so there is
+    // nothing to undo: dropping the state keeps the size when the window is
+    // moved afterwards (and keeps Stretch Step and Move from continuing from
+    // an old grid cell).
     if (index == -10 || index == -11) {
-        delete windowProperties[client.internalId].args
+        delete windowProperties[client.internalId]
+        return
     }
+
+    saveGeometry(client, geometry, prevGeometry, rectangleArgs)
 }
 
 // Other windows on the same output and desktop that the window must not cover.
