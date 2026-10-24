@@ -24,6 +24,10 @@ function paddings() {
     }
 }
 
+function resizeStep() {
+    return readConfig('ResizeStep', 80)
+}
+
 function margins() {
     return {
         left: readConfig('MarginLeft', 0),
@@ -92,6 +96,10 @@ function center(geometry) {
  * -5: Move window in rs,cs direction
  * -6: Stretch (resizes to make window touch screen side)
  * -7: Increases window span (rs and cs)
+ * -10: Fill: take the largest free area not covered by other windows
+ * -11: Grow (rs=1) or shrink (rs=-1) by ResizeStep like a tiler: edges shared
+ *       with a neighbouring window move together, so the neighbour gives or
+ *       takes the space. cs picks the axis: 0 both, 1 width only, 2 height only
  */
 function manage(index, rs, cs, r, c) {
     const client = workspace.activeWindow
@@ -197,6 +205,10 @@ function manage(index, rs, cs, r, c) {
         idx = newi * pc + newj
         geometry = geometryForGrid(idx, prs, pcs, pr, pc)
         rectangleArgs = [idx, prs, pcs, pr, pc, now]
+    } else if (index == -10) {
+        geometry = fillGeometry(client) || geometry
+    } else if (index == -11) {
+        geometry = resizedWithNeighbours(client, rs * resizeStep(), cs) || geometry
     }
 
     if (index >= 0) {
@@ -217,6 +229,188 @@ function manage(index, rs, cs, r, c) {
     client.frameGeometry = geometry
 
     saveGeometry(client, geometry, prevGeometry, rectangleArgs)
+
+    // Free-form resizes leave the grid state stale, so Stretch Step and Move
+    // must not continue from an old cell.
+    if (index == -10 || index == -11) {
+        delete windowProperties[client.internalId].args
+    }
+}
+
+// Other windows on the same output and desktop that the window must not cover.
+function otherWindows(client) {
+    const desktop = typeof workspace.currentDesktopForScreen === 'function'
+        ? workspace.currentDesktopForScreen(client.output)
+        : workspace.currentDesktop
+    return workspace.windowList().filter(w =>
+        w !== client
+        && w.normalWindow
+        && !w.minimized
+        && !w.desktopWindow
+        && w.output === client.output
+        && (w.onAllDesktops || w.desktops.indexOf(desktop) >= 0)
+    )
+}
+
+// Grows or shrinks the window by delta pixels on every side, tiler style.
+// A side that has a neighbouring window moves the shared edge, so the
+// neighbour shrinks (grow) or expands (shrink) by the same amount. A side that
+// sits on the screen edge stays put, and a side facing free space moves on its
+// own until the screen edge or the next window. Moves the neighbours itself and
+// returns the geometry for the window.
+function resizedWithNeighbours(client, delta, axis) {
+    const area = screenSize()
+    const pad = paddings()
+    const g = client.frameGeometry
+    const step = Math.abs(delta)
+    const grow = delta > 0
+    const slack = 4
+    const near = pad.inner + 12
+    const minW = 200
+    const minH = 150
+    const others = otherWindows(client)
+
+    const gx2 = g.x + g.width
+    const gy2 = g.y + g.height
+    const overlapsY = n => n.y < gy2 && n.y + n.height > g.y
+    const overlapsX = n => n.x < gx2 && n.x + n.width > g.x
+
+    const sides = {
+        right: { gap: n => n.x - gx2, span: overlapsY, size: n => n.width, min: minW,
+                 room: area.x + area.width - pad.outer - gx2 },
+        left: { gap: n => g.x - (n.x + n.width), span: overlapsY, size: n => n.width, min: minW,
+                room: g.x - (area.x + pad.outer) },
+        bottom: { gap: n => n.y - gy2, span: overlapsX, size: n => n.height, min: minH,
+                  room: area.y + area.height - pad.outer - gy2 },
+        top: { gap: n => g.y - (n.y + n.height), span: overlapsX, size: n => n.height, min: minH,
+               room: g.y - (area.y + pad.outer) },
+    }
+
+    // outward movement of each of our edges, and the neighbours that follow
+    const move = {}
+    const follow = {}
+    for (const name in sides) {
+        const sd = sides[name]
+        const horizontal = name == 'left' || name == 'right'
+        if ((axis == 1 && !horizontal) || (axis == 2 && horizontal)) {
+            move[name] = 0
+            follow[name] = []
+            continue
+        }
+        const geos = others.map(w => ({ w, f: w.frameGeometry })).filter(o => sd.span(o.f))
+        const nb = geos.filter(o => sd.gap(o.f) >= -slack && sd.gap(o.f) <= near)
+        follow[name] = nb.map(o => o.w)
+
+        if (nb.length > 0) {
+            move[name] = grow
+                ? Math.min(step, ...nb.map(o => sd.size(o.f) - sd.min))
+                : -step
+        } else if (sd.room <= slack) {
+            move[name] = 0
+        } else if (grow) {
+            const free = geos.map(o => sd.gap(o.f)).filter(d => d > near).map(d => d - pad.inner)
+            move[name] = Math.min(step, sd.room, ...free)
+        } else {
+            move[name] = -step
+        }
+        if (grow && move[name] < 0) {
+            move[name] = 0
+        }
+    }
+
+    // keep a minimum size on each axis
+    if (g.width + move.left + move.right < minW) {
+        move.left = move.right = 0
+    }
+    if (g.height + move.top + move.bottom < minH) {
+        move.top = move.bottom = 0
+    }
+
+    const moveNeighbour = (w, x, y, width, height) => {
+        const props = windowProperties[w.internalId]
+        const geo = { x, y, width, height }
+        // keep Rectangle's unsnap-restore from undoing this resize
+        if (props && props.snapped) {
+            props.snapped_geometry = geo
+        }
+        w.frameGeometry = geo
+    }
+    for (const w of follow.right) {
+        const f = w.frameGeometry
+        moveNeighbour(w, f.x + move.right, f.y, f.width - move.right, f.height)
+    }
+    for (const w of follow.left) {
+        const f = w.frameGeometry
+        moveNeighbour(w, f.x, f.y, f.width - move.left, f.height)
+    }
+    for (const w of follow.bottom) {
+        const f = w.frameGeometry
+        moveNeighbour(w, f.x, f.y + move.bottom, f.width, f.height - move.bottom)
+    }
+    for (const w of follow.top) {
+        const f = w.frameGeometry
+        moveNeighbour(w, f.x, f.y, f.width, f.height - move.top)
+    }
+
+    return {
+        x: Math.round(g.x - move.left),
+        y: Math.round(g.y - move.top),
+        width: Math.round(g.width + move.left + move.right),
+        height: Math.round(g.height + move.top + move.bottom),
+    }
+}
+
+// Largest rectangle inside the work area that overlaps no other window and
+// keeps the inner padding to them, or null if nothing free is left.
+function fillGeometry(client) {
+    const area = screenSize()
+    const pad = paddings()
+    const left = area.x + pad.outer
+    const top = area.y + pad.outer
+    const right = area.x + area.width - pad.outer
+    const bottom = area.y + area.height - pad.outer
+
+    const boxes = otherWindows(client).map(w => w.frameGeometry).map(g => ({
+        x1: g.x - pad.inner,
+        y1: g.y - pad.inner,
+        x2: g.x + g.width + pad.inner,
+        y2: g.y + g.height + pad.inner,
+    })).filter(b => b.x2 > left && b.x1 < right && b.y2 > top && b.y1 < bottom)
+
+    // The best rectangle's edges always lie on the work area or on an
+    // obstacle edge, so only those coordinates are candidates.
+    const xs = [left, right]
+    const ys = [top, bottom]
+    for (const b of boxes) {
+        xs.push(b.x1, b.x2)
+        ys.push(b.y1, b.y2)
+    }
+    const uniq = (a, lo, hi) => [...new Set(a.filter(v => v >= lo && v <= hi))].sort((p, q) => p - q)
+    const cx = uniq(xs, left, right)
+    const cy = uniq(ys, top, bottom)
+
+    let best = null
+    let bestArea = 0
+    for (let i = 0; i < cx.length; i++) {
+        for (let j = i + 1; j < cx.length; j++) {
+            for (let k = 0; k < cy.length; k++) {
+                for (let l = k + 1; l < cy.length; l++) {
+                    const w = cx[j] - cx[i]
+                    const h = cy[l] - cy[k]
+                    if (w * h <= bestArea) {
+                        continue
+                    }
+                    const hit = boxes.some(b =>
+                        b.x1 < cx[j] && b.x2 > cx[i] && b.y1 < cy[l] && b.y2 > cy[k])
+                    if (!hit) {
+                        bestArea = w * h
+                        best = { x: cx[i], y: cy[k], width: w, height: h }
+                    }
+                }
+            }
+        }
+    }
+    return best
 }
 
 function saveGeometry(client, newGeometry, prevGeometry, rectangleArgs) {
@@ -304,7 +498,7 @@ function restoreGeometry(client, geo) {
 
 function shortcut(text, shortcut, i, rs, cs, r, c) {
     text = 'Rectangle: ' + text
-    shortcut = 'Ctrl+Meta+' + shortcut
+    shortcut = shortcut ? 'Ctrl+Meta+' + shortcut : ''
     registerShortcut(text, text, shortcut, () => manage(i, rs, cs, r, c))
 }
 
@@ -372,6 +566,14 @@ shortcut('Stretch: Step: (5) Right', '6', -7, 1, 0, 1, 1)
 shortcut('Stretch: Step: (6) Top Left', '7', -7, -1, -1, 1, 1)
 shortcut('Stretch: Step: (7) Top', '8', -7, 0, -1, 1, 1)
 shortcut('Stretch: Step: (8) Top Right', '9', -7, 1, -1, 1, 1)
+
+shortcut('Resize: Grow', '', -11, 1, 0, 0, 0)
+shortcut('Resize: Shrink', '', -11, -1, 0, 0, 0)
+shortcut('Resize: Grow Width', '', -11, 1, 1, 0, 0)
+shortcut('Resize: Shrink Width', '', -11, -1, 1, 0, 0)
+shortcut('Resize: Grow Height', '', -11, 1, 2, 0, 0)
+shortcut('Resize: Shrink Height', '', -11, -1, 2, 0, 0)
+shortcut('Resize: Fill', '', -10, 0, 0, 0, 0)
 
 shortcut('Move: (1) Bottom Left', 'Alt+1', -5, -1, 1, 1, 1)
 shortcut('Move: (2) Bottom', 'Alt+2', -5, 0, 1, 1, 1)

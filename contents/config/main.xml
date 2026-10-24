@@ -24,5 +24,8 @@ xsi:schemaLocation="http://www.kde.org/standards/kcfg/1.0 http://www.kde.org/sta
     <entry name="ResizeOnUnsnap" type="Bool">
       <default>true</default>
     </entry>
+    <entry name="ResizeStep" type="Int">
+      <default>80</default>
+    </entry>
   </group>
 </kcfg>
