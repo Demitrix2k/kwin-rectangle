@@ -323,6 +323,17 @@ function resizedWithNeighbours(client, delta, axis) {
         }
     }
 
+    // Shrinking a window that is pinned on both sides of an axis (maximized)
+    // would otherwise do nothing, so shrink it from both sides instead.
+    if (!grow) {
+        if (axis != 2 && move.left == 0 && move.right == 0) {
+            move.left = move.right = -stepX
+        }
+        if (axis != 1 && move.top == 0 && move.bottom == 0) {
+            move.top = move.bottom = -stepY
+        }
+    }
+
     // keep a minimum size on each axis
     if (g.width + move.left + move.right < minW) {
         move.left = move.right = 0
