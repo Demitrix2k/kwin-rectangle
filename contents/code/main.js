@@ -262,7 +262,11 @@ function resizedWithNeighbours(client, delta, axis) {
     const area = screenSize()
     const pad = paddings()
     const g = client.frameGeometry
-    const step = Math.abs(delta)
+    // Same fraction of the screen on both axes, so windows don't get lopsided
+    // on 16:9 and other non-square monitors. ResizeStep is the long axis.
+    const long = Math.max(area.width, area.height)
+    const stepX = Math.abs(delta) * area.width / long
+    const stepY = Math.abs(delta) * area.height / long
     const grow = delta > 0
     const slack = 4
     const near = pad.inner + 12
@@ -297,6 +301,7 @@ function resizedWithNeighbours(client, delta, axis) {
             follow[name] = []
             continue
         }
+        const step = horizontal ? stepX : stepY
         const geos = others.map(w => ({ w, f: w.frameGeometry })).filter(o => sd.span(o.f))
         const nb = geos.filter(o => sd.gap(o.f) >= -slack && sd.gap(o.f) <= near)
         follow[name] = nb.map(o => o.w)
